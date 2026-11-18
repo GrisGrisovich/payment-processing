@@ -1,0 +1,70 @@
+x-app: &app
+  image: payment-processing:local
+  build: .
+  environment: &app-env
+    DATABASE_URL: "${DATABASE_URL-postgresql+asyncpg://payments:payments@postgres:5432/payments}"
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    environment:
+      RABBITMQ_DEFAULT_USER: payments
+      RABBITMQ_DEFAULT_PASS: payments
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  api:
+    <<: *app
+    environment:
+      <<: *app-env
+      API_KEY: ${API_KEY:?Set API_KEY in .env or export it}
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.api.main:app --host 0.0.0.0 --port 8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  consumer:
+    <<: *app
+    environment:
+      <<: *app-env
+      RABBITMQ_URL: "${RABBITMQ_URL-amqp://payments:payments@rabbitmq:5672/}"
+      WEBHOOK_MAX_ATTEMPTS:
+      WEBHOOK_RETRY_BASE_DELAY_SECONDS:
+    command: ["python", "-m", "app.consumer.main"]
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
